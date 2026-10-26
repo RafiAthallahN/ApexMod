@@ -12,6 +12,15 @@ export interface TelemetryFrame {
   score: number;
   connected?: boolean;
   device_name?: string;
+  speed_kmh: number;
+  gear: number;
+  abs_active: boolean;
+  tc_active: boolean;
+  lap_index: number;
+  lap_time_ms: number;
+  track_id: string;
+  car_model: string;
+  udp_connected: boolean;
 }
 
 export interface DeadzoneConfig {

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::config::CalibrationProfile;
+use crate::input::acc_udp::AccCarTelemetry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModulationEvent {
@@ -9,18 +10,18 @@ pub enum ModulationEvent {
     ThrottleSnap,
 }
 
-/// Telemetry frame broadcast over WebSocket at 60Hz (Schema.md §2.3)
+/// Time-synced Telemetry Frame merging evdev triggers + ACC UDP car state (PRD v2.0.0 §2.2)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetryFrame {
-    /// Unix epoch timestamp in milliseconds
+    /// Master frame timestamp in milliseconds
     pub t: u64,
     /// Normalized & EMA-filtered brake position [0.0, 1.0]
     pub brk: f32,
     /// Normalized & EMA-filtered throttle position [0.0, 1.0]
     pub thr: f32,
-    /// Instantaneous brake velocity d(brk)/dt (normalized units / sec)
+    /// Instantaneous brake velocity d(brk)/dt (1/s)
     pub d_brk: f32,
-    /// Instantaneous throttle velocity d(thr)/dt (normalized units / sec)
+    /// Instantaneous throttle velocity d(thr)/dt (1/s)
     pub d_thr: f32,
     /// Instantaneous brake jerk d^2(brk)/dt^2
     pub j_brk: f32,
@@ -34,6 +35,24 @@ pub struct TelemetryFrame {
     pub connected: bool,
     /// Controller identifier
     pub device_name: String,
+    /// ACC UDP: Vehicle speed (km/h)
+    pub speed_kmh: f32,
+    /// ACC UDP: Sequential gear (-1 = R, 0 = N, 1..6 = 1st..6th)
+    pub gear: i32,
+    /// ACC UDP: ABS intervention active flag
+    pub abs_active: bool,
+    /// ACC UDP: Traction Control slip cut active flag
+    pub tc_active: bool,
+    /// ACC UDP: Current lap number
+    pub lap_index: i32,
+    /// ACC UDP: Current lap elapsed time in ms
+    pub lap_time_ms: u32,
+    /// ACC UDP: Active circuit identifier
+    pub track_id: String,
+    /// ACC UDP: Active vehicle model identifier
+    pub car_model: String,
+    /// ACC UDP listener connection state
+    pub udp_connected: bool,
 }
 
 pub struct ModulationEvaluator {
@@ -74,6 +93,7 @@ impl ModulationEvaluator {
     }
 
     /// Step the physics evaluator forward by `dt` seconds (target: 0.004s at 250Hz)
+    #[allow(clippy::too_many_arguments)]
     pub fn step(
         &mut self,
         raw_brk: f32,
@@ -82,6 +102,7 @@ impl ModulationEvaluator {
         profile: &CalibrationProfile,
         timestamp_ms: u64,
         connected: bool,
+        car: &AccCarTelemetry,
     ) -> TelemetryFrame {
         let dt_safe = dt.max(0.0005);
 
@@ -149,8 +170,9 @@ impl ModulationEvaluator {
             let combined_jerk = (j_brk.abs() * 0.6 + j_thr.abs() * 0.4) / 60.0;
             let instantaneous_quality = (100.0 - combined_jerk.min(100.0)).clamp(0.0, 100.0);
             let blend = (dt_safe * 2.5).min(1.0);
-            self.rolling_score =
-                (self.rolling_score * (1.0 - blend) + instantaneous_quality * blend).clamp(0.0, 100.0);
+            self.rolling_score = (self.rolling_score * (1.0 - blend)
+                + instantaneous_quality * blend)
+                .clamp(0.0, 100.0);
         }
 
         self.prev_brk = brk;
@@ -170,6 +192,15 @@ impl ModulationEvaluator {
             score: (self.rolling_score * 10.0).round() / 10.0,
             connected,
             device_name: profile.device_name.clone(),
+            speed_kmh: car.speed_kmh,
+            gear: car.gear,
+            abs_active: car.abs_active,
+            tc_active: car.tc_active,
+            lap_index: car.lap_index,
+            lap_time_ms: car.lap_time_ms,
+            track_id: car.track_id.clone(),
+            car_model: car.car_model.clone(),
+            udp_connected: car.udp_connected,
         }
     }
 }
@@ -185,17 +216,18 @@ mod tests {
             ema_alpha: 1.0, // Unfiltered for deterministic unit test
             ..Default::default()
         };
+        let car = AccCarTelemetry::default();
 
         // Hold heavy brake (> 0.70)
-        let f1 = eval.step(0.95, 0.0, 0.004, &profile, 1000, true);
+        let f1 = eval.step(0.95, 0.0, 0.004, &profile, 1000, true, &car);
         assert_eq!(f1.event, None);
 
         // Abruptly dump brake to 0.10 in 4ms -> d_brk = -212.5 / s
-        let f2 = eval.step(0.10, 0.0, 0.004, &profile, 1004, true);
+        let f2 = eval.step(0.10, 0.0, 0.004, &profile, 1004, true, &car);
         assert_eq!(f2.event, Some(ModulationEvent::BrakeDump));
 
         // Abruptly snap throttle from 0.0 to 0.90 in 4ms -> d_thr = +225.0 / s
-        let f3 = eval.step(0.0, 0.90, 0.004, &profile, 1008, true);
+        let f3 = eval.step(0.0, 0.90, 0.004, &profile, 1008, true, &car);
         assert_eq!(f3.event, Some(ModulationEvent::ThrottleSnap));
     }
 }

@@ -1,14 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { CalibrationProfile, ModulationEventType, TelemetryFrame } from './lib/types';
-  import EventAlertBanner from './lib/components/EventAlertBanner.svelte';
-  import LiveInputRibbon from './lib/components/LiveInputRibbon.svelte';
-  import RadialJerkGauge from './lib/components/RadialJerkGauge.svelte';
-
-  interface SamplePoint {
-    t: number;
-    val: number;
-  }
+  import type { CalibrationProfile, TelemetryFrame } from './lib/types';
+  import TriggerModule from './lib/components/TriggerModule.svelte';
+  import DualTraceOscilloscope, {
+    type DualSamplePoint
+  } from './lib/components/DualTraceOscilloscope.svelte';
+  import CarStateTiles from './lib/components/CarStateTiles.svelte';
 
   let frame = $state<TelemetryFrame>({
     t: 0,
@@ -19,7 +16,16 @@
     event: null,
     score: 100.0,
     connected: false,
-    device_name: 'Uncalibrated / Disconnected'
+    device_name: 'Uncalibrated / Disconnected',
+    speed_kmh: 0,
+    gear: 0,
+    abs_active: false,
+    tc_active: false,
+    lap_index: 1,
+    lap_time_ms: 0,
+    track_id: 'monza',
+    car_model: 'porsche_992_gt3_r',
+    udp_connected: false
   });
 
   let profile = $state<CalibrationProfile>({
@@ -38,16 +44,15 @@
   let wsConnected = $state(false);
   let showCalibrationDrawer = $state(false);
 
-  let brakeHistory = $state<SamplePoint[]>([]);
-  let throttleHistory = $state<SamplePoint[]>([]);
+  let dualHistory = $state<DualSamplePoint[]>([]);
 
-  let activeBannerEvent = $state<ModulationEventType>(null);
-  let activeBannerVelocity = $state(0);
   let brakeViolation = $state(false);
+  let brakeViolationVel = $state(0);
   let throttleViolation = $state(false);
+  let throttleViolationVel = $state(0);
 
-  let bannerTimer: ReturnType<typeof setTimeout> | null = null;
-  let violationTimer: ReturnType<typeof setTimeout> | null = null;
+  let brakeViolationTimer: ReturnType<typeof setTimeout> | null = null;
+  let throttleViolationTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let activeSocket: WebSocket | null = null;
   let useProxyWsFallback = false;
@@ -121,37 +126,25 @@
         const now = performance.now();
         const cutoff = now - 3200;
 
-        brakeHistory.push({ t: now, val: incoming.brk });
-        throttleHistory.push({ t: now, val: incoming.thr });
-
-        if (brakeHistory.length > 240) {
-          brakeHistory = brakeHistory.filter((p) => p.t >= cutoff);
-        }
-        if (throttleHistory.length > 240) {
-          throttleHistory = throttleHistory.filter((p) => p.t >= cutoff);
+        dualHistory.push({ t: now, brk: incoming.brk, thr: incoming.thr });
+        if (dualHistory.length > 240) {
+          dualHistory = dualHistory.filter((p) => p.t >= cutoff);
         }
 
-        if (incoming.event) {
-          activeBannerEvent = incoming.event;
-          activeBannerVelocity =
-            incoming.event === 'BRAKE_DUMP' ? incoming.d_brk * 100 : incoming.d_thr * 100;
-
-          if (bannerTimer) clearTimeout(bannerTimer);
-          bannerTimer = setTimeout(() => {
-            activeBannerEvent = null;
-          }, 400);
-
-          if (incoming.event === 'BRAKE_DUMP') {
-            brakeViolation = true;
-          } else if (incoming.event === 'THROTTLE_SNAP') {
-            throttleViolation = true;
-          }
-
-          if (violationTimer) clearTimeout(violationTimer);
-          violationTimer = setTimeout(() => {
+        if (incoming.event === 'BRAKE_DUMP') {
+          brakeViolation = true;
+          brakeViolationVel = incoming.d_brk * 100;
+          if (brakeViolationTimer) clearTimeout(brakeViolationTimer);
+          brakeViolationTimer = setTimeout(() => {
             brakeViolation = false;
+          }, 450);
+        } else if (incoming.event === 'THROTTLE_SNAP') {
+          throttleViolation = true;
+          throttleViolationVel = incoming.d_thr * 100;
+          if (throttleViolationTimer) clearTimeout(throttleViolationTimer);
+          throttleViolationTimer = setTimeout(() => {
             throttleViolation = false;
-          }, 200);
+          }, 450);
         }
       } catch {
         // Ignore malformed packet
@@ -160,7 +153,6 @@
 
     ws.onclose = () => {
       wsConnected = false;
-      // Alternate between direct port 8765 and HTTP /ws endpoint on reconnect
       useProxyWsFallback = !useProxyWsFallback;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(connectWebSocket, 1200);
@@ -173,8 +165,8 @@
 
     return () => {
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (bannerTimer) clearTimeout(bannerTimer);
-      if (violationTimer) clearTimeout(violationTimer);
+      if (brakeViolationTimer) clearTimeout(brakeViolationTimer);
+      if (throttleViolationTimer) clearTimeout(throttleViolationTimer);
       if (activeSocket) {
         activeSocket.onclose = null;
         activeSocket.close();
@@ -183,29 +175,44 @@
   });
 </script>
 
-<main class="cockpit-shell">
-  <!-- Top Bar -->
-  <header class="topbar">
-    <div class="brand">
-      <span class="brand-mark">APEXMOD</span>
-      <span class="caption-unit">
-        {frame.device_name || 'Uncalibrated'} · {wsConnected ? '60Hz WS LIVE' : 'RECONNECTING'}
+<main class="console-root">
+  <!-- 5.1 System Status Bar (Header) -->
+  <header class="status-banner">
+    <div class="status-left">
+      <span class="brand-badge">APEXMOD</span>
+      <span class="pipeline-item micro-label" class:online={wsConnected}>
+        WS: {wsConnected ? 'ONLINE' : 'SYNCING'}
       </span>
+      <span class="pipeline-item micro-label" class:online={frame.udp_connected}>
+        UDP :9000 {frame.udp_connected ? 'LINKED' : 'STBY'}
+      </span>
+      <span class="pipeline-item micro-label">250HZ POLL // SQLITE WAL</span>
     </div>
 
-    <!-- Component C: Event Alert Banner / Earcon Visualizer -->
-    <EventAlertBanner activeEvent={activeBannerEvent} velocityPctPerSec={activeBannerVelocity} />
+    <div class="status-right">
+      <span class="meta-badge micro-label">ACC GT3</span>
+      <span class="meta-badge micro-label">{(frame.track_id || 'MONZA').toUpperCase()}</span>
+      <span class="meta-badge micro-label">
+        {(frame.car_model || 'PORSCHE_992_GT3_R').replace(/_/g, ' ').toUpperCase()}
+      </span>
 
-    <!-- Zero In-Game Friction Controls (<= 3 clicks, Design.md §1.2) -->
-    <div class="quick-actions">
-      <button class="btn-action" onclick={toggleMute}>
-        {profile.audio_muted ? 'EARCONS: MUTED' : 'EARCONS: ACTIVE'}
-      </button>
-      <button class="btn-action" onclick={activateControllerOrSim}>
-        {simulationEnabled ? 'SIM RIG: ON' : 'SIM RIG: OFF'}
+      <button
+        class="ctrl-btn micro-label"
+        class:btn-active={!profile.audio_muted}
+        onclick={toggleMute}
+      >
+        EARCONS: {profile.audio_muted ? 'MUTE' : 'ON'}
       </button>
       <button
-        class="btn-action"
+        class="ctrl-btn micro-label"
+        class:btn-active={simulationEnabled}
+        onclick={activateControllerOrSim}
+      >
+        SIM RIG: {simulationEnabled ? 'ON' : 'OFF'}
+      </button>
+      <button
+        class="ctrl-btn micro-label"
+        class:btn-active={showCalibrationDrawer}
         onclick={() => (showCalibrationDrawer = !showCalibrationDrawer)}
       >
         CALIBRATE
@@ -214,9 +221,9 @@
   </header>
 
   {#if showCalibrationDrawer}
-    <section class="calibration-bar">
-      <div class="cal-item">
-        <label class="caption-unit" for="ema">EMA FILTER (α): {profile.ema_alpha.toFixed(2)}</label>
+    <section class="calibration-panel">
+      <div class="cal-box">
+        <label class="micro-label" for="ema">EMA FILTER (α): {profile.ema_alpha.toFixed(2)}</label>
         <input
           id="ema"
           type="range"
@@ -227,9 +234,9 @@
           onchange={saveProfile}
         />
       </div>
-      <div class="cal-item">
-        <label class="caption-unit" for="dump">
-          BRAKE DUMP LIMIT: -{Math.round(profile.dump_velocity_threshold * 100)}%/s
+      <div class="cal-box">
+        <label class="micro-label" for="dump">
+          BRAKE DUMP THRESHOLD: -{Math.round(profile.dump_velocity_threshold * 100)}%/S
         </label>
         <input
           id="dump"
@@ -241,9 +248,9 @@
           onchange={saveProfile}
         />
       </div>
-      <div class="cal-item">
-        <label class="caption-unit" for="snap">
-          THROTTLE SNAP LIMIT: +{Math.round(profile.snap_velocity_threshold * 100)}%/s
+      <div class="cal-box">
+        <label class="micro-label" for="snap">
+          THROTTLE SNAP THRESHOLD: +{Math.round(profile.snap_velocity_threshold * 100)}%/S
         </label>
         <input
           id="snap"
@@ -258,186 +265,241 @@
     </section>
   {/if}
 
-  <!-- Main Telemetry Grid (Compact stacked vs Expanded 3-column horizontal ribbon) -->
-  <div class="telemetry-workspace" class:dimmed={!frame.connected}>
-    <!-- Left Channel: Brake Ribbon (Component A) -->
-    <LiveInputRibbon
-      channel="brake"
-      label="BRAKE (LT)"
-      liveValue={frame.brk}
-      liveVelocity={frame.d_brk}
-      history={brakeHistory}
-      violationActive={brakeViolation}
-    />
+  <!-- 4.2 Responsive 12-Column Cockpit Grid -->
+  <div class="cockpit-grid" class:dimmed={!frame.connected}>
+    <!-- Left Trigger (3 cols on Desktop) -->
+    <div class="col-left">
+      <TriggerModule
+        channel="brake"
+        tag="LT"
+        label="BRAKE CHANNEL"
+        liveValue={frame.brk}
+        liveVelocity={frame.d_brk}
+        assistActive={frame.abs_active}
+        assistLabel="ABS"
+        violationActive={brakeViolation}
+        violationVelocity={brakeViolationVel}
+      />
+    </div>
 
-    <!-- Center HUD: Radial Jerk & Velocity Gauge (Component B) -->
-    <RadialJerkGauge
-      brakeVelocity={frame.d_brk}
-      throttleVelocity={frame.d_thr}
-      score={frame.score}
-      dumpThreshold={profile.dump_velocity_threshold}
-      snapThreshold={profile.snap_velocity_threshold}
-    />
+    <!-- Center Column: Oscilloscope & ACC Vehicle Telemetry (6 cols on Desktop, pinned to top on Mobile) -->
+    <div class="col-center">
+      <DualTraceOscilloscope
+        history={dualHistory}
+        liveBrake={frame.brk}
+        liveThrottle={frame.thr}
+      />
 
-    <!-- Right Channel: Throttle Ribbon (Component A) -->
-    <LiveInputRibbon
-      channel="throttle"
-      label="THROTTLE (RT)"
-      liveValue={frame.thr}
-      liveVelocity={frame.d_thr}
-      history={throttleHistory}
-      violationActive={throttleViolation}
-    />
+      <CarStateTiles
+        speedKmh={frame.speed_kmh}
+        gear={frame.gear}
+        modulationScore={frame.score}
+        lapIndex={frame.lap_index}
+        lapTimeMs={frame.lap_time_ms}
+      />
+    </div>
+
+    <!-- Right Trigger (3 cols on Desktop) -->
+    <div class="col-right">
+      <TriggerModule
+        channel="throttle"
+        tag="RT"
+        label="THROTTLE CHANNEL"
+        liveValue={frame.thr}
+        liveVelocity={frame.d_thr}
+        assistActive={frame.tc_active}
+        assistLabel="TC"
+        violationActive={throttleViolation}
+        violationVelocity={throttleViolationVel}
+      />
+    </div>
   </div>
 
-  <!-- Uncalibrated / Disconnected Overlay (Design.md §6) -->
-  {#if !frame.connected}
-    <div class="disconnected-overlay">
-      <div class="disconnected-card">
-        <p class="body-regular">No hardware evdev trigger activity detected.</p>
-        <button class="btn-detect" onclick={activateControllerOrSim}>
-          Detect Controller (Move Triggers) / Start Virtual GT3 Rig
-        </button>
-      </div>
-    </div>
-  {/if}
+  <!-- Hardware Status Footer Bar -->
+  <footer class="footer-bar">
+    <span class="micro-label">CONTROLLER: {frame.device_name || 'DISCONNECTED'}</span>
+    {#if !frame.connected}
+      <button class="detect-btn micro-label" onclick={activateControllerOrSim}>
+        [ DETECT CONTROLLER OR START VIRTUAL GT3 RIG ]
+      </button>
+    {:else}
+      <span class="micro-label">ARCHIVE: SESSIONS.DB (WAL) // 500MS BATCH FLUSH</span>
+    {/if}
+  </footer>
 </main>
 
 <style>
-  .cockpit-shell {
+  .console-root {
     min-height: 100vh;
-    background: var(--bg-base);
-    padding: var(--space-md);
+    padding: var(--p-3);
     display: flex;
     flex-direction: column;
-    gap: var(--space-md);
-    position: relative;
+    gap: var(--p-3);
+    max-width: 1600px;
+    margin: 0 auto;
   }
 
-  .topbar {
-    display: grid;
-    grid-template-columns: 1fr auto 1fr;
+  /* 5.1 System Status Bar (Header) */
+  .status-banner {
+    background: var(--brand-surface);
+    border: 1px solid var(--brand-border);
+    padding: var(--p-2) var(--p-3);
+    display: flex;
+    justify-content: space-between;
     align-items: center;
-    gap: var(--space-sm);
-    padding-bottom: var(--space-sm);
-    border-bottom: 1px solid var(--border-subtle);
+    flex-wrap: wrap;
+    gap: var(--p-2);
   }
 
-  .brand {
+  .status-left,
+  .status-right {
     display: flex;
-    flex-direction: column;
-    gap: var(--space-xxs);
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--p-2);
   }
 
-  .brand-mark {
-    font-family: var(--font-mono);
-    font-size: 16px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    color: var(--text-primary);
-  }
-
-  .quick-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: var(--space-xs);
-  }
-
-  .btn-action {
-    background: var(--bg-surface-elevated);
-    color: var(--text-primary);
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    padding: var(--space-xs) var(--space-sm);
+  /* Solid white badge (#EDEDED background with #080808 text) */
+  .brand-badge {
+    background: var(--brand-accent);
+    color: var(--brand-black);
     font-family: var(--font-mono);
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 900;
+    padding: 4px 8px;
+    letter-spacing: 0.08em;
+  }
+
+  .pipeline-item {
+    padding: 4px 8px;
+    border: 1px solid var(--brand-border);
+    background: var(--brand-black);
+  }
+
+  .pipeline-item.online {
+    color: var(--brand-throttle);
+    border-color: var(--brand-borderLight);
+  }
+
+  .meta-badge {
+    padding: 4px 8px;
+    border: 1px solid var(--brand-border);
+    background: var(--brand-elevated);
+    color: var(--brand-accent);
+  }
+
+  .ctrl-btn {
+    padding: 4px 10px;
+    border: 1px solid var(--brand-borderLight);
+    background: var(--brand-elevated);
+    color: var(--brand-muted);
     cursor: pointer;
   }
 
-  .btn-action:hover {
-    border-color: var(--text-secondary);
+  .ctrl-btn:hover {
+    border-color: var(--brand-accent);
+    color: var(--brand-accent);
   }
 
-  .calibration-bar {
-    background: var(--bg-surface-elevated);
-    border: 1px solid var(--border-subtle);
-    border-radius: 8px;
-    padding: var(--space-sm);
+  .ctrl-btn.btn-active {
+    background: var(--brand-accent);
+    color: var(--brand-black);
+    border-color: var(--brand-accent);
+  }
+
+  .calibration-panel {
+    background: var(--brand-surface);
+    border: 1px solid var(--brand-border);
+    padding: var(--p-3);
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: var(--space-md);
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: var(--p-3);
   }
 
-  .cal-item {
+  .cal-box {
+    background: var(--brand-black);
+    border: 1px solid var(--brand-border);
+    padding: var(--p-2);
     display: flex;
     flex-direction: column;
-    gap: var(--space-xs);
+    gap: var(--p-2);
   }
 
-  /* Expanded (> 768px): Dual-channel horizontal ribbon layout with central telemetry HUD */
-  .telemetry-workspace {
+  /* Desktop (> 1024px): 12-column layout: Left Trigger (3 cols), Center (6 cols), Right Trigger (3 cols) */
+  .cockpit-grid {
     display: grid;
-    grid-template-columns: 1fr 280px 1fr;
-    gap: var(--space-md);
+    grid-template-columns: repeat(12, 1fr);
+    gap: var(--p-3);
     align-items: stretch;
-    transition: opacity 200ms ease;
   }
 
-  /* Uncalibrated / Disconnected state (Design.md §6): 40% opacity */
-  .telemetry-workspace.dimmed {
-    opacity: 0.4;
+  .cockpit-grid.dimmed {
+    opacity: 0.55;
   }
 
-  .disconnected-overlay {
-    position: fixed;
-    inset: 0;
-     pointer-events: none;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    z-index: 20;
-  }
-
-  .disconnected-card {
-    pointer-events: auto;
-    background: var(--bg-surface-elevated);
-    border: 1px solid var(--border-subtle);
-    border-radius: 8px;
-    padding: var(--space-md);
+  .col-left {
+    grid-column: span 3;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: var(--space-sm);
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.65);
   }
 
-  .btn-detect {
-    background: var(--accent-throttle);
-    color: #0D0E11;
-    border: none;
-    border-radius: 6px;
-    padding: 12px var(--space-md);
-    font-family: var(--font-sans);
-    font-size: 14px;
-    font-weight: 700;
+  .col-center {
+    grid-column: span 6;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: var(--p-3);
+  }
+
+  .col-right {
+    grid-column: span 3;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .col-left > :global(*),
+  .col-right > :global(*) {
+    flex: 1;
+  }
+
+  .footer-bar {
+    background: var(--brand-surface);
+    border: 1px solid var(--brand-border);
+    padding: var(--p-2) var(--p-3);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--p-2);
+  }
+
+  .detect-btn {
+    background: var(--brand-throttle);
+    color: var(--brand-black);
+    border: 1px solid var(--brand-throttle);
+    padding: 4px 10px;
     cursor: pointer;
   }
 
-  /* Compact Breakpoint (360px - 768px, Design.md §4): Single stacked column */
-  @media (max-width: 768px) {
-    .topbar {
-      grid-template-columns: 1fr;
-      justify-items: center;
-      text-align: center;
+  /* Tablet (768px - 1024px): Scope top (12 cols), Left & Right Triggers side-by-side below (6 cols each) */
+  @media (max-width: 1024px) {
+    .col-center {
+      grid-column: span 12;
+      order: -1;
     }
 
-    .quick-actions {
-      justify-content: center;
+    .col-left,
+    .col-right {
+      grid-column: span 6;
     }
+  }
 
-    .telemetry-workspace {
-      grid-template-columns: 1fr;
+  /* Mobile / Phone Mount (< 768px): Scope pinned to top; Left/Right Triggers stacked below */
+  @media (max-width: 767px) {
+    .col-center,
+    .col-left,
+    .col-right {
+      grid-column: span 12;
     }
   }
 </style>

@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 
 use audio::EarconEngine;
 use input::InputManager;
-use physics::{ModulationEvent, ModulationEvaluator};
+use physics::{ModulationEvaluator, ModulationEvent};
 use server::{run_dedicated_ws_server, run_http_dashboard_server, SharedAppState};
 use storage::TelemetryStore;
 
@@ -25,14 +25,13 @@ async fn main() {
         )
         .init();
 
-    tracing::info!("Starting ApexMod Core Daemon (250Hz Polling / 60Hz Telemetry WS)");
+    tracing::info!("Starting ApexMod v2.0 Core Daemon (250Hz Polling / ACC UDP :9000 / 60Hz WS)");
 
-    // Initialize local SQLite store in WAL mode (Schema.md §2.5)
+    // Initialize local SQLite store in WAL mode with async ring-buffer batch writer (PRD v2.0.0 §3 & §4)
     let store = TelemetryStore::open("apexmod.db").expect("Failed to open apexmod.db SQLite store");
     let initial_profile = store.load_or_default_profile("default");
 
     let profile = Arc::new(RwLock::new(initial_profile));
-    // Default simulation_enabled to false unless --sim flag or APEXMOD_SIM=1 is passed
     let sim_default = std::env::args().any(|a| a == "--sim" || a == "--simulate")
         || std::env::var("APEXMOD_SIM").is_ok_and(|v| v == "1" || v == "true");
     let simulation_enabled = Arc::new(RwLock::new(sim_default));
@@ -42,7 +41,7 @@ async fn main() {
     // Spawn low-latency stereo procedural audio engine (FR-3.1..3.4)
     let earcon_engine = EarconEngine::spawn();
 
-    // Spawn 250Hz deterministic input & physics thread (FR-1.4, Schema.md §2.1)
+    // Spawn 250Hz deterministic input & physics thread (FR-1.4, PRD v2.0.0 §1)
     let loop_profile = Arc::clone(&profile);
     let loop_sim = Arc::clone(&simulation_enabled);
     let loop_tx = tx_frames.clone();
@@ -69,7 +68,7 @@ async fn main() {
                     input_mgr.simulation_enabled = *sim_flag;
                 }
 
-                let (raw_brk, raw_thr, connected, device_name) = input_mgr.poll(dt);
+                let (raw_brk, raw_thr, connected, device_name, car_state) = input_mgr.poll(dt);
 
                 let mut active_profile = loop_profile
                     .read()
@@ -89,6 +88,7 @@ async fn main() {
                     &active_profile,
                     timestamp_ms,
                     connected,
+                    &car_state,
                 );
 
                 // Drive low-latency stereo earcons at 250Hz
@@ -98,17 +98,11 @@ async fn main() {
                     active_profile.audio_volume,
                 );
 
-                // Persist fault events to SQLite (WAL) and hold event until next 60Hz WS frame
                 if let Some(ev) = frame.event {
                     sticky_event = Some(ev);
-                    let vel = match ev {
-                        ModulationEvent::BrakeDump => frame.d_brk,
-                        ModulationEvent::ThrottleSnap => frame.d_thr,
-                    };
-                    loop_store.record_event(timestamp_ms, ev, vel, frame.score);
                 }
 
-                // Broadcast over WebSocket at 60Hz (FR-4.1)
+                // Broadcast over WebSocket and enqueue to Async Storage Ring Buffer at 60Hz (PRD v2.0.0 §1 & §4)
                 if now.duration_since(last_ws_broadcast) >= ws_interval {
                     last_ws_broadcast = now;
                     if frame.event.is_none() && sticky_event.is_some() {
@@ -116,6 +110,9 @@ async fn main() {
                     } else {
                         sticky_event = None;
                     }
+
+                    // Non-blocking enqueue to SQLite WAL ring buffer
+                    loop_store.push_frame(frame.clone());
 
                     if let Ok(json_payload) = serde_json::to_string(&frame) {
                         let _ = loop_tx.send(json_payload);

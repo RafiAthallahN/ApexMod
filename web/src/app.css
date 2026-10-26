@@ -1,75 +1,106 @@
 :root {
-  /* Color System (Design.md §2) */
-  --bg-base: #0D0E11;
-  --bg-surface: #16181D;
-  --bg-surface-elevated: #21242C;
-  --border-subtle: #2D313B;
-  --text-primary: #F1F3F5;
-  --text-secondary: #8C93A0;
-  --accent-brake: #FF3B30;
-  --accent-brake-dim: #4A1513;
-  --accent-throttle: #34C759;
-  --accent-throttle-dim: #11381B;
-  --status-warning: #FF9500;
-  --status-critical: #FF2D55;
+  /* Base Surface Tokens (Design.md v2.0 §2.1) */
+  --brand-black: #080808;
+  --brand-surface: #101012;
+  --brand-elevated: #17171A;
+  --brand-border: #242429;
+  --brand-borderLight: #383842;
 
-  /* 8px Spatial Grid Tokens (Design.md §4) */
-  --space-xxs: 4px;
-  --space-xs: 8px;
-  --space-sm: 16px;
-  --space-md: 24px;
-  --space-lg: 32px;
+  /* Text & Content Tokens (Design.md v2.0 §2.2) */
+  --brand-accent: #EDEDED;
+  --brand-muted: #70707D;
+  --brand-dim: #3A3A42;
 
-  /* Typography Families (Design.md §3) */
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  /* Semantic Telemetry Tokens (Design.md v2.0 §2.3) */
+  --brand-brake: #FF3333;
+  --brand-brakeBg: #2B0B0B;
+  --brand-throttle: #00E676;
+  --brand-throttleBg: #052914;
+  --brand-warning: #F59E0B;
+
+  /* 4px / 8px Baseline Grid Tokens (Design.md v2.0 §4.1) */
+  --p-1: 4px;
+  --p-2: 8px;
+  --p-3: 12px;
+  --p-4: 16px;
+
+  /* Typography Stacks (Design.md v2.0 §3) */
   --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --font-sans: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
-* {
+/* Core Tenet 1: Strict Orthogonality (Zero Radius) */
+*,
+*::before,
+*::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+  border-radius: 0px !important;
 }
 
 html,
 body {
-  background-color: var(--bg-base);
-  color: var(--text-primary);
-  font-family: var(--font-sans);
+  background-color: var(--brand-black);
+  color: var(--brand-accent);
+  font-family: var(--font-mono);
   font-size: 14px;
-  line-height: 1.4;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
   min-height: 100vh;
   overflow-x: hidden;
 }
 
-/* Typography Utility Classes (Design.md §3) */
-.display-large {
-  font-family: var(--font-mono);
-  font-size: 32px;
-  line-height: 1.2;
-  font-weight: 700;
+/* High-precision engineering grid (Design.md v2.0 §4.1) */
+.bg-grid-tech {
+  background-size: 24px 24px;
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
 }
 
-.metric-primary {
+/* Typography System Classes (Design.md v2.0 §3) */
+.display-value {
+  font-family: var(--font-mono);
+  font-size: 48px;
+  line-height: 1.0;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+.metric-medium {
   font-family: var(--font-mono);
   font-size: 24px;
-  line-height: 1.0;
-  font-weight: 700;
+  line-height: 1.1;
+  font-weight: 900;
   font-variant-numeric: tabular-nums;
 }
 
-.body-regular {
+.header-section {
   font-family: var(--font-sans);
   font-size: 14px;
-  line-height: 1.4;
-  font-weight: 400;
+  line-height: 1.2;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
-.caption-unit {
+.sub-header {
   font-family: var(--font-mono);
   font-size: 11px;
-  line-height: 1.2;
+  line-height: 1.3;
   font-weight: 500;
-  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.micro-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.0;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--brand-muted);
 }

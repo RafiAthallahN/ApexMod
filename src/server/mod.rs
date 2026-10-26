@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 
 use crate::config::CalibrationProfile;
-use crate::storage::TelemetryStore;
+use crate::storage::{SessionSummary, TelemetryStore};
 
 #[derive(Clone)]
 pub struct SharedAppState {
@@ -38,7 +38,7 @@ pub struct StatusResponse {
     pub simulation_enabled: bool,
 }
 
-/// Spawns the dedicated 60Hz WebSocket broadcast server at 127.0.0.1:8765 (FR-4.1 / Schema.md §2.3)
+/// Spawns the dedicated 60Hz WebSocket broadcast server at 0.0.0.0:8765 (FR-4.1 / Schema.md §2.3)
 pub async fn run_dedicated_ws_server(addr: SocketAddr, tx_frames: broadcast::Sender<String>) {
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -81,6 +81,7 @@ pub async fn run_dedicated_ws_server(addr: SocketAddr, tx_frames: broadcast::Sen
 pub async fn run_http_dashboard_server(addr: SocketAddr, state: SharedAppState) {
     let app = Router::new()
         .route("/api/status", get(get_status))
+        .route("/api/sessions", get(get_sessions))
         .route("/api/config", post(update_config))
         .route("/api/simulate", post(toggle_simulation))
         .route("/ws", get(axum_ws_handler))
@@ -114,6 +115,10 @@ async fn get_status(State(state): State<SharedAppState>) -> Json<StatusResponse>
         profile,
         simulation_enabled,
     })
+}
+
+async fn get_sessions(State(state): State<SharedAppState>) -> Json<Vec<SessionSummary>> {
+    Json(state.store.list_recent_sessions(20))
 }
 
 async fn update_config(
